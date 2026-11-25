@@ -20,18 +20,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Get repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
-      - name: Install dependencies
+      - name: Install packages
         run: npm install
 
-      - name: Build website
+      - name: Build game
         run: npm run build
         env:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
@@ -40,7 +40,7 @@ jobs:
       - name: Upload website
         uses: actions/upload-pages-artifact@v3
         with:
-          path: dist
+          path: ./dist
 
   deploy:
     environment:
@@ -51,6 +51,6 @@ jobs:
     needs: build
 
     steps:
-      - name: Deploy website
+      - name: Publish website
         id: deployment
         uses: actions/deploy-pages@v4
