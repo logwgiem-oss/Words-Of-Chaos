@@ -16,8 +16,6 @@ import {
 import { supabase, ensureGuest, isConnected } from "./supabase";
 import { MODES, PROMPTS, pick } from "./game";
 
-const localName = () => "Player " + Math.floor(10 + Math.random() * 90);
-
 export default function App() {
   const [screen, setScreen] = useState("home");
   const [name, setName] = useState("");
@@ -32,7 +30,6 @@ export default function App() {
   const [voteCounts, setVoteCounts] = useState({});
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
-  const [selectedMode, setSelectedMode] = useState("caption");
   const [canvasColor, setCanvasColor] = useState("#242033");
   const [canvasWidth, setCanvasWidth] = useState(5);
 
@@ -54,7 +51,7 @@ export default function App() {
     }, 3500);
   };
 
-  const refresh = async (code = room?.code) => {
+  async function refresh(code = room?.code) {
     if (!supabase || !code) return;
 
     const { data, error } = await supabase.rpc(
@@ -74,7 +71,7 @@ export default function App() {
     setAnswers(data.answers || []);
     setVotes(data.my_votes || []);
     setVoteCounts(data.vote_counts || {});
-  };
+  }
 
   useEffect(() => {
     if (!room?.code || !supabase) return;
@@ -89,15 +86,17 @@ export default function App() {
   }, [room?.code]);
 
   useEffect(() => {
-    if (room?.state === "playing" && room.current_round) {
+    if (!room) return;
+
+    if (room.state === "playing" && room.current_round) {
       setRound(room.current_round);
       setScreen("game");
-    } else if (room?.state === "lobby") {
+    } else if (room.state === "lobby") {
       setScreen("lobby");
-    } else if (room?.state === "results") {
+    } else if (room.state === "results") {
       setScreen("results");
     }
-  }, [room?.state, room?.current_round]);
+  }, [room]);
 
   useEffect(() => {
     return () => {
@@ -107,7 +106,7 @@ export default function App() {
     };
   }, []);
 
-  const enterRoom = async (data) => {
+  async function enterRoom(data) {
     setUserId(data.user_id);
     setRoomCode(data.room.code);
     setRoom(data.room);
@@ -116,38 +115,46 @@ export default function App() {
     setVotes(data.my_votes || []);
     setVoteCounts(data.vote_counts || {});
     setScreen("lobby");
-  };
+  }
 
-  const createRoom = async () => {
+  async function createRoom() {
     if (!name.trim()) {
       notify("Enter your player name first.");
+      return;
+    }
+
+    if (!isConnected) {
+      notify("Words of Chaos is not connected to Supabase.");
       return;
     }
 
     setBusy(true);
 
     try {
-      await ensureGuest();
+      const user = await ensureGuest();
 
       const { data, error } = await supabase.rpc(
         "words_create_room",
         {
           p_name: name.trim().slice(0, 18),
-          p_mode: selectedMode
+          p_mode: "caption"
         }
       );
 
       if (error) throw error;
 
-      await enterRoom(data);
+      await enterRoom({
+        ...data,
+        user_id: user.id
+      });
     } catch (error) {
       notify(error.message || "Could not create the room.");
     } finally {
       setBusy(false);
     }
-  };
+  }
 
-  const joinRoom = async () => {
+  async function joinRoom() {
     if (!name.trim()) {
       notify("Enter your player name first.");
       return;
@@ -158,10 +165,15 @@ export default function App() {
       return;
     }
 
+    if (!isConnected) {
+      notify("Words of Chaos is not connected to Supabase.");
+      return;
+    }
+
     setBusy(true);
 
     try {
-      await ensureGuest();
+      const user = await ensureGuest();
 
       const { data, error } = await supabase.rpc(
         "words_join_room",
@@ -173,15 +185,18 @@ export default function App() {
 
       if (error) throw error;
 
-      await enterRoom(data);
+      await enterRoom({
+        ...data,
+        user_id: user.id
+      });
     } catch (error) {
       notify(error.message || "Could not join the room.");
     } finally {
       setBusy(false);
     }
-  };
+  }
 
-  const startGame = async () => {
+  async function startGame() {
     if (!isHost) return;
 
     if (players.length < 2) {
@@ -189,7 +204,10 @@ export default function App() {
       return;
     }
 
-    const mode = MODES.find((item) => item.id === room.mode) || MODES[0];
+    const mode = MODES.find(
+      (item) => item.id === room.mode
+    ) || MODES[0];
+
     const prompt = pick(PROMPTS[mode.id]);
 
     const { error } = await supabase.rpc(
@@ -205,9 +223,9 @@ export default function App() {
     } else {
       await refresh(room.code);
     }
-  };
+  }
 
-  const submitAnswer = async () => {
+  async function submitAnswer() {
     if (!answer.trim()) {
       notify("Write an answer first.");
       return;
@@ -230,9 +248,9 @@ export default function App() {
     setAnswer("");
     notify("Your answer has been submitted.");
     await refresh(room.code);
-  };
+  }
 
-  const submitDrawing = async () => {
+  async function submitDrawing() {
     const drawingCanvas = canvas.current;
 
     if (!drawingCanvas) return;
@@ -254,9 +272,9 @@ export default function App() {
       notify("Your drawing has been submitted.");
       await refresh(room.code);
     }
-  };
+  }
 
-  const finishRound = async () => {
+  async function finishRound() {
     if (!isHost) return;
 
     const { error } = await supabase.rpc(
@@ -269,12 +287,15 @@ export default function App() {
     } else {
       await refresh(room.code);
     }
-  };
+  }
 
-  const nextRound = async () => {
+  async function nextRound() {
     if (!isHost) return;
 
-    const mode = MODES.find((item) => item.id === room.mode) || MODES[0];
+    const mode = MODES.find(
+      (item) => item.id === room.mode
+    ) || MODES[0];
+
     const prompt = pick(PROMPTS[mode.id]);
 
     const { error } = await supabase.rpc(
@@ -293,15 +314,17 @@ export default function App() {
       setVoteCounts({});
       await refresh(room.code);
     }
-  };
+  }
 
-  const vote = async (answerId) => {
+  async function vote(answerId) {
     if (votes.length > 0) {
       notify("You have already voted this round.");
       return;
     }
 
-    const selected = answers.find((item) => item.id === answerId);
+    const selected = answers.find(
+      (item) => item.id === answerId
+    );
 
     if (!selected) {
       notify("That answer is no longer available.");
@@ -328,9 +351,9 @@ export default function App() {
 
     await refresh(room.code);
     notify("Your vote has been saved.");
-  };
+  }
 
-  const leave = async () => {
+  async function leave() {
     if (room?.code) {
       const { error } = await supabase.rpc(
         "words_leave_room",
@@ -351,18 +374,18 @@ export default function App() {
     setVoteCounts({});
     setUserId(null);
     setScreen("home");
-  };
+  }
 
-  const copyCode = async () => {
+  async function copyCode() {
     try {
       await navigator.clipboard.writeText(room.code);
       notify("Room code copied!");
     } catch {
       notify("Your room code is " + room.code);
     }
-  };
+  }
 
-  const beginDraw = (event) => {
+  function beginDraw(event) {
     const drawingCanvas = canvas.current;
     if (!drawingCanvas) return;
 
@@ -376,9 +399,9 @@ export default function App() {
       ((event.clientX - rect.left) / rect.width) * drawingCanvas.width,
       ((event.clientY - rect.top) / rect.height) * drawingCanvas.height
     );
-  };
+  }
 
-  const moveDraw = (event) => {
+  function moveDraw(event) {
     if (!drawing.current) return;
 
     const drawingCanvas = canvas.current;
@@ -398,15 +421,14 @@ export default function App() {
     );
 
     context.stroke();
-  };
+  }
 
-  const endDraw = () => {
+  function endDraw() {
     drawing.current = false;
-  };
+  }
 
-  const clearCanvas = () => {
+  function clearCanvas() {
     const drawingCanvas = canvas.current;
-
     if (!drawingCanvas) return;
 
     drawingCanvas.getContext("2d").clearRect(
@@ -415,16 +437,19 @@ export default function App() {
       drawingCanvas.width,
       drawingCanvas.height
     );
-  };
+  }
 
-  const mode = MODES.find((item) => item.id === room?.mode) || MODES[0];
+  const mode = MODES.find(
+    (item) => item.id === room?.mode
+  ) || MODES[0];
 
+  // Corrected: define the current round's answers before rendering.
   const roundAnswers = answers.filter(
     (item) => item.round_no === round?.number
   );
 
   const leaderboard = [...players].sort(
-    (a, b) => b.score - a.score
+    (a, b) => (b.score || 0) - (a.score || 0)
   );
 
   return (
@@ -432,7 +457,11 @@ export default function App() {
       <header className="topbar">
         <a
           className="brand"
-          onClick={() => screen !== "home" && leave()}
+          href="#home"
+          onClick={(event) => {
+            event.preventDefault();
+            if (screen !== "home") leave();
+          }}
         >
           <span className="brand-mark">W</span>
           <span>WORDS <b>OF CHAOS</b></span>
@@ -500,7 +529,7 @@ export default function App() {
                   onClick={createRoom}
                   disabled={busy || !isConnected}
                 >
-                  <Plus /> Create a room
+                  <Plus /> {busy ? "Creating..." : "Create a room"}
                 </button>
 
                 <div className="join-box">
@@ -589,7 +618,7 @@ export default function App() {
                 {players.map((player) => (
                   <div className="player-card" key={player.id}>
                     <div className="avatar">
-                      {player.name.slice(0, 1).toUpperCase()}
+                      {player.name?.slice(0, 1).toUpperCase()}
                     </div>
 
                     <div>
@@ -622,8 +651,6 @@ export default function App() {
                     disabled={!isHost}
                     onClick={async () => {
                       if (!isHost) return;
-
-                      setSelectedMode(item.id);
 
                       const { error } = await supabase.rpc(
                         "words_set_mode",
@@ -724,6 +751,7 @@ export default function App() {
                 ref={canvas}
                 width="900"
                 height="520"
+                style={{ touchAction: "none", width: "100%" }}
                 onPointerDown={beginDraw}
                 onPointerMove={moveDraw}
                 onPointerUp={endDraw}
@@ -779,7 +807,7 @@ export default function App() {
                 return (
                   <div className="submission-row" key={player.id}>
                     <span className="avatar small-avatar">
-                      {player.name[0].toUpperCase()}
+                      {player.name?.[0]?.toUpperCase()}
                     </span>
 
                     <span>{player.name}</span>
@@ -838,7 +866,9 @@ export default function App() {
                   )}
 
                   <small>
-                    {players.find((player) => player.id === item.player_id)?.name || "Player"}
+                    {players.find(
+                      (player) => player.user_id === item.user_id
+                    )?.name || "Player"}
                   </small>
 
                   <button
@@ -873,10 +903,10 @@ export default function App() {
               <div className="score-row" key={player.id}>
                 <b>#{index + 1}</b>
                 <span className="avatar small-avatar">
-                  {player.name[0].toUpperCase()}
+                  {player.name?.[0]?.toUpperCase()}
                 </span>
                 <strong>{player.name}</strong>
-                <span>{player.score} pts</span>
+                <span>{player.score || 0} pts</span>
               </div>
             ))}
           </div>
