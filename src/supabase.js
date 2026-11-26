@@ -1,32 +1,54 @@
 import { createClient } from "@supabase/supabase-js";
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
+const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-export const isSupabaseConfigured = Boolean(
-  supabaseUrl && supabaseKey
+export const isConnected = Boolean(
+  SUPABASE_URL && SUPABASE_KEY
 );
 
-export const supabase = isSupabaseConfigured
-  ? createClient(supabaseUrl, supabaseKey)
+export const supabase = isConnected
+  ? createClient(SUPABASE_URL, SUPABASE_KEY, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true
+      }
+    })
   : null;
 
-export async function getGuestSession() {
+export async function ensureGuest() {
   if (!supabase) {
-    throw new Error("Supabase has not been configured yet.");
+    throw new Error(
+      "Words of Chaos is not connected to Supabase. Check its existing project settings."
+    );
   }
 
   const {
     data: { session },
-    error: sessionError,
+    error: sessionError
   } = await supabase.auth.getSession();
 
-  if (sessionError) throw sessionError;
-  if (session) return session;
+  if (sessionError) {
+    throw sessionError;
+  }
 
-  const { data, error } = await supabase.auth.signInAnonymously();
+  if (session) {
+    return session.user;
+  }
 
-  if (error) throw error;
+  const {
+    data,
+    error
+  } = await supabase.auth.signInAnonymously();
 
-  return data.session;
+  if (error) {
+    throw error;
+  }
+
+  if (!data?.user) {
+    throw new Error("Could not create a player session.");
+  }
+
+  return data.user;
 }
