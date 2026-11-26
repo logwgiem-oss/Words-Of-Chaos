@@ -1,562 +1,454 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  Users,
   Copy,
+  Crown,
+  LogOut,
   Play,
   Plus,
-  LogIn,
-  Crown,
+  Users,
+  Check,
   Send,
-  ArrowLeft,
   RotateCcw,
-  Trophy,
-  Palette,
+  WifiOff,
+  Eraser
 } from "lucide-react";
 
-import {
-  GAME_MODES,
-  getRandomPrompt,
-  createRoomCode,
-  shuffleArray,
-} from "./game";
+import { supabase, ensureGuest, isConnected } from "./supabase";
+import { MODES, PROMPTS, pick } from "./game";
 
-import {
-  supabase,
-  isSupabaseConfigured,
-  getGuestSession,
-} from "./supabase";
-
-const MAX_PLAYERS = 12;
+const localName = () => "Player " + Math.floor(10 + Math.random() * 90);
 
 export default function App() {
   const [screen, setScreen] = useState("home");
-  const [playerName, setPlayerName] = useState("");
-  const [roomCodeInput, setRoomCodeInput] = useState("");
+  const [name, setName] = useState("");
   const [roomCode, setRoomCode] = useState("");
+  const [room, setRoom] = useState(null);
   const [players, setPlayers] = useState([]);
-  const [hostId, setHostId] = useState("");
-  const [playerId, setPlayerId] = useState("");
-  const [selectedMode, setSelectedMode] = useState("fill");
-  const [prompt, setPrompt] = useState("");
+  const [userId, setUserId] = useState(null);
+  const [round, setRound] = useState(null);
   const [answer, setAnswer] = useState("");
   const [answers, setAnswers] = useState([]);
-  const [scores, setScores] = useState({});
-  const [phase, setPhase] = useState("lobby");
+  const [votes, setVotes] = useState([]);
+  const [voteCounts, setVoteCounts] = useState({});
   const [message, setMessage] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [votes, setVotes] = useState({});
-  const [hasVoted, setHasVoted] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [selectedMode, setSelectedMode] = useState("caption");
+  const [canvasColor, setCanvasColor] = useState("#242033");
+  const [canvasWidth, setCanvasWidth] = useState(5);
 
-  const canvasRef = useRef(null);
-  const drawingRef = useRef(false);
-  const channelRef = useRef(null);
+  const canvas = useRef(null);
+  const drawing = useRef(false);
+  const messageTimer = useRef(null);
 
-  const isHost = playerId === hostId;
-  const currentPlayer = players.find((player) => player.id === playerId);
+  const isHost = room?.host_id === userId;
+
+  const notify = (text) => {
+    setMessage(text);
+
+    if (messageTimer.current) {
+      clearTimeout(messageTimer.current);
+    }
+
+    messageTimer.current = setTimeout(() => {
+      setMessage("");
+    }, 3500);
+  };
+
+  const refresh = async (code = room?.code) => {
+    if (!supabase || !code) return;
+
+    const { data, error } = await supabase.rpc(
+      "words_get_room_state",
+      { p_code: code }
+    );
+
+    if (error) {
+      notify(error.message);
+      return;
+    }
+
+    if (!data?.room) return;
+
+    setRoom(data.room);
+    setPlayers(data.players || []);
+    setAnswers(data.answers || []);
+    setVotes(data.my_votes || []);
+    setVoteCounts(data.vote_counts || {});
+  };
 
   useEffect(() => {
-    if (!message) return;
+    if (!room?.code || !supabase) return;
 
-    const timer = setTimeout(() => setMessage(""), 3500);
-    return () => clearTimeout(timer);
-  }, [message]);
+    refresh(room.code);
 
-  async function enterGame() {
-    const name = playerName.trim();
+    const timer = setInterval(() => {
+      refresh(room.code);
+    }, 1500);
 
-    if (!name) {
-      setMessage("Please enter your name first.");
-      return;
-    }
+    return () => clearInterval(timer);
+  }, [room?.code]);
 
-    if (!isSupabaseConfigured) {
-      setMessage("Add your Supabase settings before playing online.");
-      return;
-    }
-
-    setLoading(true);
-
-    try {
-      const session = await getGuestSession();
-      setPlayerId(session.user.id);
-      return session.user.id;
-    } catch (error) {
-      setMessage(error.message || "Could not connect to the game.");
-      setLoading(false);
-      return null;
-    }
-  }
-
-  async function createRoom() {
-    const id = await enterGame();
-    if (!id) return;
-
-    try {
-      const code = createRoomCode();
-
-      const { error: roomError } = await supabase
-        .from("game_rooms")
-        .insert({
-          code,
-          host_id: id,
-          mode: selectedMode,
-          status: "lobby",
-          round_number: 0,
-        });
-
-      if (roomError) throw roomError;
-
-      const { error: playerError } = await supabase
-        .from("game_players")
-        .insert({
-          room_code: code,
-          player_id: id,
-          name: playerName.trim(),
-          score: 0,
-        });
-
-      if (playerError) throw playerError;
-
-      setRoomCode(code);
-      setHostId(id);
-      setPlayers([
-        {
-          id,
-          name: playerName.trim(),
-          score: 0,
-        },
-      ]);
-      setScores({ [id]: 0 });
+  useEffect(() => {
+    if (room?.state === "playing" && room.current_round) {
+      setRound(room.current_round);
+      setScreen("game");
+    } else if (room?.state === "lobby") {
       setScreen("lobby");
-      setPhase("lobby");
-      subscribeToRoom(code);
-    } catch (error) {
-      setMessage(error.message || "Could not create room.");
-    } finally {
-      setLoading(false);
+    } else if (room?.state === "results") {
+      setScreen("results");
     }
-  }
-
-  async function joinRoom() {
-    const id = await enterGame();
-    if (!id) return;
-
-    const code = roomCodeInput.trim().toUpperCase();
-
-    if (!code) {
-      setMessage("Enter a room code.");
-      setLoading(false);
-      return;
-    }
-
-    try {
-      const { data: room, error: roomError } = await supabase
-        .from("game_rooms")
-        .select("*")
-        .eq("code", code)
-        .single();
-
-      if (roomError || !room) {
-        throw new Error("That room could not be found.");
-      }
-
-      if (room.status !== "lobby") {
-        throw new Error("That game has already started.");
-      }
-
-      const { data: existingPlayers, error: listError } = await supabase
-        .from("game_players")
-        .select("*")
-        .eq("room_code", code);
-
-      if (listError) throw listError;
-
-      if (existingPlayers.length >= MAX_PLAYERS) {
-        throw new Error("That room is full.");
-      }
-
-      const { error: joinError } = await supabase
-        .from("game_players")
-        .insert({
-          room_code: code,
-          player_id: id,
-          name: playerName.trim(),
-          score: 0,
-        });
-
-      if (joinError) throw joinError;
-
-      setRoomCode(code);
-      setHostId(room.host_id);
-      setPlayers(
-        existingPlayers.map((player) => ({
-          id: player.player_id,
-          name: player.name,
-          score: player.score,
-        })).concat({
-          id,
-          name: playerName.trim(),
-          score: 0,
-        })
-      );
-
-      setScores(
-        Object.fromEntries(
-          existingPlayers.map((player) => [
-            player.player_id,
-            player.score,
-          ])
-        )
-      );
-
-      setSelectedMode(room.mode);
-      setScreen("lobby");
-      setPhase("lobby");
-      subscribeToRoom(code);
-    } catch (error) {
-      setMessage(error.message || "Could not join room.");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  function subscribeToRoom(code) {
-    if (channelRef.current) {
-      supabase.removeChannel(channelRef.current);
-    }
-
-    const channel = supabase
-      .channel(`room-${code}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "game_players",
-          filter: `room_code=eq.${code}`,
-        },
-        () => refreshPlayers(code)
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "game_rooms",
-          filter: `code=eq.${code}`,
-        },
-        (payload) => {
-          if (payload.new?.mode) {
-            setSelectedMode(payload.new.mode);
-          }
-
-          if (payload.new?.status) {
-            setPhase(payload.new.status);
-          }
-
-          if (payload.new?.round_number !== undefined) {
-            setPrompt(payload.new.prompt || "");
-          }
-        }
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "game_answers",
-          filter: `room_code=eq.${code}`,
-        },
-        () => refreshAnswers(code)
-      )
-      .subscribe();
-
-    channelRef.current = channel;
-
-    refreshPlayers(code);
-    refreshAnswers(code);
-  }
-
-  async function refreshPlayers(code) {
-    const { data, error } = await supabase
-      .from("game_players")
-      .select("*")
-      .eq("room_code", code);
-
-    if (error || !data) return;
-
-    setPlayers(
-      data.map((player) => ({
-        id: player.player_id,
-        name: player.name,
-        score: player.score,
-      }))
-    );
-
-    setScores(
-      Object.fromEntries(
-        data.map((player) => [
-          player.player_id,
-          player.score,
-        ])
-      )
-    );
-  }
-
-  async function refreshAnswers(code) {
-    const { data, error } = await supabase
-      .from("game_answers")
-      .select("*")
-      .eq("room_code", code);
-
-    if (error || !data) return;
-
-    setAnswers(
-      data.map((item) => ({
-        id: item.id,
-        playerId: item.player_id,
-        text: item.answer,
-      }))
-    );
-  }
-
-  async function startRound() {
-    if (!isHost) return;
-
-    if (players.length < 2) {
-      setMessage("You need at least two players to start.");
-      return;
-    }
-
-    const nextPrompt = getRandomPrompt(selectedMode);
-
-    const { error } = await supabase
-      .from("game_rooms")
-      .update({
-        status: "playing",
-        round_number: 1,
-        prompt: nextPrompt,
-      })
-      .eq("code", roomCode);
-
-    if (error) {
-      setMessage(error.message);
-      return;
-    }
-
-    await supabase
-      .from("game_answers")
-      .delete()
-      .eq("room_code", roomCode);
-
-    setPrompt(nextPrompt);
-    setAnswers([]);
-    setAnswer("");
-    setVotes({});
-    setHasVoted(false);
-    setPhase("playing");
-    setScreen("game");
-  }
-
-  async function submitAnswer() {
-    if (!answer.trim()) {
-      setMessage("Write an answer first.");
-      return;
-    }
-
-    if (answers.some((item) => item.playerId === playerId)) {
-      setMessage("You've already submitted an answer.");
-      return;
-    }
-
-    const { error } = await supabase
-      .from("game_answers")
-      .insert({
-        room_code: roomCode,
-        player_id: playerId,
-        answer: answer.trim(),
-      });
-
-    if (error) {
-      setMessage(error.message);
-      return;
-    }
-
-    setAnswer("");
-    setMessage("Answer submitted!");
-
-    await refreshAnswers(roomCode);
-  }
-
-  async function revealAnswers() {
-    if (!isHost) return;
-
-    const shuffled = shuffleArray(answers);
-
-    setAnswers(shuffled);
-    setPhase("reveal");
-
-    await supabase
-      .from("game_rooms")
-      .update({ status: "reveal" })
-      .eq("code", roomCode);
-  }
-
-  async function voteForAnswer(answerId) {
-    if (hasVoted) {
-      setMessage("You've already voted.");
-      return;
-    }
-
-    const chosen = answers.find((item) => item.id === answerId);
-
-    if (!chosen || chosen.playerId === playerId) {
-      setMessage("You cannot vote for your own answer.");
-      return;
-    }
-
-    const newVotes = {
-      ...votes,
-      [answerId]: (votes[answerId] || 0) + 1,
-    };
-
-    setVotes(newVotes);
-    setHasVoted(true);
-
-    setMessage("Vote submitted!");
-  }
-
-  async function finishRound() {
-    if (!isHost) return;
-
-    const updatedScores = { ...scores };
-
-    for (const [answerId, count] of Object.entries(votes)) {
-      const chosen = answers.find((item) => item.id === answerId);
-
-      if (chosen) {
-        updatedScores[chosen.playerId] =
-          (updatedScores[chosen.playerId] || 0) + count;
-      }
-    }
-
-    for (const player of players) {
-      await supabase
-        .from("game_players")
-        .update({
-          score: updatedScores[player.id] || 0,
-        })
-        .eq("room_code", roomCode)
-        .eq("player_id", player.id);
-    }
-
-    setScores(updatedScores);
-    setPhase("results");
-
-    await supabase
-      .from("game_rooms")
-      .update({ status: "results" })
-      .eq("code", roomCode);
-  }
-
-  async function backToLobby() {
-    if (!isHost) return;
-
-    await supabase
-      .from("game_rooms")
-      .update({ status: "lobby" })
-      .eq("code", roomCode);
-
-    setPhase("lobby");
-    setScreen("lobby");
-  }
-
-  function copyCode() {
-    navigator.clipboard?.writeText(roomCode);
-    setMessage("Room code copied!");
-  }
-
-  function startDrawing(event) {
-    if (selectedMode !== "picture" && selectedMode !== "telephone") return;
-
-    drawingRef.current = true;
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const rect = canvas.getBoundingClientRect();
-    const ctx = canvas.getContext("2d");
-
-    ctx.beginPath();
-    ctx.moveTo(
-      event.clientX - rect.left,
-      event.clientY - rect.top
-    );
-  }
-
-  function draw(event) {
-    if (!drawingRef.current) return;
-
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const rect = canvas.getBoundingClientRect();
-    const ctx = canvas.getContext("2d");
-
-    ctx.lineWidth = 4;
-    ctx.lineCap = "round";
-    ctx.strokeStyle = "#29223f";
-
-    ctx.lineTo(
-      event.clientX - rect.left,
-      event.clientY - rect.top
-    );
-
-    ctx.stroke();
-  }
-
-  function stopDrawing() {
-    drawingRef.current = false;
-  }
-
-  function clearDrawing() {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    canvas.getContext("2d").clearRect(
-      0,
-      0,
-      canvas.width,
-      canvas.height
-    );
-  }
+  }, [room?.state, room?.current_round]);
 
   useEffect(() => {
     return () => {
-      if (channelRef.current && supabase) {
-        supabase.removeChannel(channelRef.current);
+      if (messageTimer.current) {
+        clearTimeout(messageTimer.current);
       }
     };
   }, []);
 
-  function modeName() {
-    return GAME_MODES.find((mode) => mode.id === selectedMode)?.name;
-  }
+  const enterRoom = async (data) => {
+    setUserId(data.user_id);
+    setRoomCode(data.room.code);
+    setRoom(data.room);
+    setPlayers(data.players || []);
+    setAnswers(data.answers || []);
+    setVotes(data.my_votes || []);
+    setVoteCounts(data.vote_counts || {});
+    setScreen("lobby");
+  };
+
+  const createRoom = async () => {
+    if (!name.trim()) {
+      notify("Enter your player name first.");
+      return;
+    }
+
+    setBusy(true);
+
+    try {
+      await ensureGuest();
+
+      const { data, error } = await supabase.rpc(
+        "words_create_room",
+        {
+          p_name: name.trim().slice(0, 18),
+          p_mode: selectedMode
+        }
+      );
+
+      if (error) throw error;
+
+      await enterRoom(data);
+    } catch (error) {
+      notify(error.message || "Could not create the room.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const joinRoom = async () => {
+    if (!name.trim()) {
+      notify("Enter your player name first.");
+      return;
+    }
+
+    if (roomCode.trim().length !== 4) {
+      notify("Enter the four-letter room code.");
+      return;
+    }
+
+    setBusy(true);
+
+    try {
+      await ensureGuest();
+
+      const { data, error } = await supabase.rpc(
+        "words_join_room",
+        {
+          p_code: roomCode.trim().toUpperCase(),
+          p_name: name.trim().slice(0, 18)
+        }
+      );
+
+      if (error) throw error;
+
+      await enterRoom(data);
+    } catch (error) {
+      notify(error.message || "Could not join the room.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const startGame = async () => {
+    if (!isHost) return;
+
+    if (players.length < 2) {
+      notify("Invite at least one other player before starting.");
+      return;
+    }
+
+    const mode = MODES.find((item) => item.id === room.mode) || MODES[0];
+    const prompt = pick(PROMPTS[mode.id]);
+
+    const { error } = await supabase.rpc(
+      "words_start_game",
+      {
+        p_code: room.code,
+        p_prompt: prompt
+      }
+    );
+
+    if (error) {
+      notify(error.message);
+    } else {
+      await refresh(room.code);
+    }
+  };
+
+  const submitAnswer = async () => {
+    if (!answer.trim()) {
+      notify("Write an answer first.");
+      return;
+    }
+
+    const { error } = await supabase.rpc(
+      "words_submit_answer",
+      {
+        p_code: room.code,
+        p_content: answer.trim().slice(0, 500),
+        p_kind: "text"
+      }
+    );
+
+    if (error) {
+      notify(error.message);
+      return;
+    }
+
+    setAnswer("");
+    notify("Your answer has been submitted.");
+    await refresh(room.code);
+  };
+
+  const submitDrawing = async () => {
+    const drawingCanvas = canvas.current;
+
+    if (!drawingCanvas) return;
+
+    const dataUrl = drawingCanvas.toDataURL("image/png");
+
+    const { error } = await supabase.rpc(
+      "words_submit_answer",
+      {
+        p_code: room.code,
+        p_content: dataUrl,
+        p_kind: "drawing"
+      }
+    );
+
+    if (error) {
+      notify(error.message);
+    } else {
+      notify("Your drawing has been submitted.");
+      await refresh(room.code);
+    }
+  };
+
+  const finishRound = async () => {
+    if (!isHost) return;
+
+    const { error } = await supabase.rpc(
+      "words_finish_round",
+      { p_code: room.code }
+    );
+
+    if (error) {
+      notify(error.message);
+    } else {
+      await refresh(room.code);
+    }
+  };
+
+  const nextRound = async () => {
+    if (!isHost) return;
+
+    const mode = MODES.find((item) => item.id === room.mode) || MODES[0];
+    const prompt = pick(PROMPTS[mode.id]);
+
+    const { error } = await supabase.rpc(
+      "words_next_round",
+      {
+        p_code: room.code,
+        p_prompt: prompt
+      }
+    );
+
+    if (error) {
+      notify(error.message);
+    } else {
+      setAnswer("");
+      setVotes([]);
+      setVoteCounts({});
+      await refresh(room.code);
+    }
+  };
+
+  const vote = async (answerId) => {
+    if (votes.length > 0) {
+      notify("You have already voted this round.");
+      return;
+    }
+
+    const selected = answers.find((item) => item.id === answerId);
+
+    if (!selected) {
+      notify("That answer is no longer available.");
+      return;
+    }
+
+    if (selected.user_id === userId) {
+      notify("You cannot vote for your own answer.");
+      return;
+    }
+
+    const { error } = await supabase.rpc(
+      "words_vote_answer",
+      {
+        p_code: room.code,
+        p_answer_id: answerId
+      }
+    );
+
+    if (error) {
+      notify(error.message);
+      return;
+    }
+
+    await refresh(room.code);
+    notify("Your vote has been saved.");
+  };
+
+  const leave = async () => {
+    if (room?.code) {
+      const { error } = await supabase.rpc(
+        "words_leave_room",
+        { p_code: room.code }
+      );
+
+      if (error) {
+        notify(error.message);
+        return;
+      }
+    }
+
+    setRoom(null);
+    setPlayers([]);
+    setAnswers([]);
+    setRound(null);
+    setVotes([]);
+    setVoteCounts({});
+    setUserId(null);
+    setScreen("home");
+  };
+
+  const copyCode = async () => {
+    try {
+      await navigator.clipboard.writeText(room.code);
+      notify("Room code copied!");
+    } catch {
+      notify("Your room code is " + room.code);
+    }
+  };
+
+  const beginDraw = (event) => {
+    const drawingCanvas = canvas.current;
+    if (!drawingCanvas) return;
+
+    drawing.current = true;
+
+    const context = drawingCanvas.getContext("2d");
+    const rect = drawingCanvas.getBoundingClientRect();
+
+    context.beginPath();
+    context.moveTo(
+      ((event.clientX - rect.left) / rect.width) * drawingCanvas.width,
+      ((event.clientY - rect.top) / rect.height) * drawingCanvas.height
+    );
+  };
+
+  const moveDraw = (event) => {
+    if (!drawing.current) return;
+
+    const drawingCanvas = canvas.current;
+    if (!drawingCanvas) return;
+
+    const context = drawingCanvas.getContext("2d");
+    const rect = drawingCanvas.getBoundingClientRect();
+
+    context.strokeStyle = canvasColor;
+    context.lineWidth = canvasWidth;
+    context.lineCap = "round";
+    context.lineJoin = "round";
+
+    context.lineTo(
+      ((event.clientX - rect.left) / rect.width) * drawingCanvas.width,
+      ((event.clientY - rect.top) / rect.height) * drawingCanvas.height
+    );
+
+    context.stroke();
+  };
+
+  const endDraw = () => {
+    drawing.current = false;
+  };
+
+  const clearCanvas = () => {
+    const drawingCanvas = canvas.current;
+
+    if (!drawingCanvas) return;
+
+    drawingCanvas.getContext("2d").clearRect(
+      0,
+      0,
+      drawingCanvas.width,
+      drawingCanvas.height
+    );
+  };
+
+  const mode = MODES.find((item) => item.id === room?.mode) || MODES[0];
+
+  const roundAnswers = answers.filter(
+    (item) => item.round_no === round?.number
+  );
+
+  const leaderboard = [...players].sort(
+    (a, b) => b.score - a.score
+  );
 
   return (
-    <main className="app">
+    <main className="app-shell">
       <header className="topbar">
-        <button
-          className="logo"
-          onClick={() => {
-            if (screen === "home") return;
-            setScreen("home");
-          }}
+        <a
+          className="brand"
+          onClick={() => screen !== "home" && leave()}
         >
-          <span className="logo-icon">W</span>
-          <span>Words of <strong>Chaos</strong></span>
-        </button>
+          <span className="brand-mark">W</span>
+          <span>WORDS <b>OF CHAOS</b></span>
+        </a>
 
-        <span className="top-tag">MULTIPLAYER PARTY GAME</span>
+        <div className="top-right">
+          <span className="online">
+            <i /> LIVE PARTY GAME
+          </span>
+
+          {room && (
+            <span className="room-pill">
+              ROOM {room.code}
+            </span>
+          )}
+        </div>
       </header>
 
       {message && (
@@ -565,326 +457,449 @@ export default function App() {
         </div>
       )}
 
+      {!isConnected && (
+        <div className="setup-note">
+          <WifiOff size={16} />
+          Supabase isn't connected. Check the existing Words of Chaos
+          project settings.
+        </div>
+      )}
+
       {screen === "home" && (
-        <section className="home-screen">
-          <div className="hero">
-            <div className="eyebrow">🎉 THE PARTY STARTS HERE</div>
+        <section className="hero">
+          <div className="hero-copy">
+            <div className="eyebrow">
+              <span /> THE PARTY GAME FOR BIG IDEAS & BAD ANSWERS
+            </div>
 
             <h1>
-              Words of
-              <span> Chaos.</span>
+              MAKE WORDS.
+              <br />
+              <em>MAKE CHAOS.</em>
             </h1>
 
             <p>
-              Ridiculous prompts. Wild answers.
-              Unforgettable rounds.
+              One room. A whole lot of imagination.
+              And absolutely no sensible answers.
             </p>
-          </div>
 
-          <div className="home-card">
-            <label htmlFor="playerName">YOUR PLAYER NAME</label>
+            <div className="home-actions">
+              <div className="panel">
+                <label>YOUR PLAYER NAME</label>
+                <input
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  maxLength={18}
+                  placeholder="What should we call you?"
+                />
+              </div>
 
-            <input
-              id="playerName"
-              value={playerName}
-              onChange={(event) => setPlayerName(event.target.value)}
-              placeholder="Enter your name..."
-              maxLength={20}
-            />
+              <div className="home-grid">
+                <button
+                  className="btn primary"
+                  onClick={createRoom}
+                  disabled={busy || !isConnected}
+                >
+                  <Plus /> Create a room
+                </button>
 
-            <button
-              className="primary-button"
-              disabled={loading}
-              onClick={createRoom}
-            >
-              <Plus size={19} />
-              {loading ? "Creating..." : "Create a game"}
-            </button>
+                <div className="join-box">
+                  <input
+                    value={roomCode}
+                    onChange={(event) =>
+                      setRoomCode(event.target.value.toUpperCase())
+                    }
+                    maxLength={4}
+                    placeholder="ROOM CODE"
+                  />
 
-            <div className="divider">
-              <span>OR JOIN A GAME</span>
+                  <button
+                    className="btn secondary"
+                    onClick={joinRoom}
+                    disabled={busy || !isConnected || roomCode.length !== 4}
+                  >
+                    <Play size={17} /> Join
+                  </button>
+                </div>
+              </div>
             </div>
-
-            <input
-              value={roomCodeInput}
-              onChange={(event) =>
-                setRoomCodeInput(event.target.value.toUpperCase())
-              }
-              placeholder="Enter room code..."
-              maxLength={5}
-            />
-
-            <button
-              className="secondary-button"
-              disabled={loading}
-              onClick={joinRoom}
-            >
-              <LogIn size={19} />
-              Join a game
-            </button>
-
-            {!isSupabaseConfigured && (
-              <p className="setup-warning">
-                Supabase setup is needed before online games can run.
-              </p>
-            )}
           </div>
 
-          <div className="home-features">
-            <div>🎨 Draw</div>
-            <div>✏️ Write</div>
-            <div>😂 Laugh</div>
-            <div>🏆 Score</div>
+          <div className="hero-art">
+            <div className="orbit orbit-a" />
+            <div className="orbit orbit-b" />
+            <div className="sticker sticker-one">LOL!</div>
+            <div className="sticker sticker-two">??</div>
+            <div className="sticker sticker-three">✦</div>
+
+            <div className="chaos-card">
+              <span className="card-kicker">ROUND 01 / CHAOS</span>
+              <div className="speech">
+                What if
+                <br />
+                <strong>bananas</strong>
+                <br />
+                ran the world?
+              </div>
+              <div className="scribble">〰</div>
+              <div className="card-foot">
+                <span>NO WRONG ANSWERS</span>
+                <span>✳</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="mode-strip">
+            <span>7 WAYS TO PLAY</span>
+            {MODES.map((item) => (
+              <span key={item.id}>
+                {item.icon} {item.name}
+              </span>
+            ))}
           </div>
         </section>
       )}
 
-      {screen === "lobby" && (
-        <section className="lobby-screen">
-          <button
-            className="back-button"
-            onClick={() => setScreen("home")}
-          >
-            <ArrowLeft size={17} /> Back
-          </button>
-
-          <div className="section-heading">
-            <div className="eyebrow">GAME LOBBY</div>
-            <h1>Get ready for chaos!</h1>
-            <p>Invite everyone using your room code.</p>
+      {screen === "lobby" && room && (
+        <section className="content-page">
+          <div className="page-heading">
+            <div className="eyebrow"><span /> YOUR CHAOS HQ</div>
+            <h1>THE <em>LOBBY</em></h1>
+            <p>Get everyone in. Pick a mode. Let the chaos begin.</p>
           </div>
 
-          <div className="room-code-card">
-            <div>
-              <span>ROOM CODE</span>
-              <strong>{roomCode}</strong>
-            </div>
+          <div className="lobby-layout">
+            <div className="panel large">
+              <div className="panel-head">
+                <div>
+                  <div className="eyebrow">ROOM CODE</div>
+                  <h2>{room.code}</h2>
+                </div>
 
-            <button onClick={copyCode}>
-              <Copy size={18} />
-              Copy
-            </button>
-          </div>
+                <button className="icon-btn" onClick={copyCode}>
+                  <Copy size={18} /> Copy invite code
+                </button>
+              </div>
 
-          <div className="lobby-grid">
-            <div className="panel">
-              <h2>
-                <Users size={20} /> Players ({players.length}/{MAX_PLAYERS})
-              </h2>
+              <p className="muted">
+                Share this four-letter code with your players.
+              </p>
 
-              <div className="player-list">
+              <div className="players-grid">
                 {players.map((player) => (
-                  <div className="player-row" key={player.id}>
-                    <div className="player-avatar">
-                      {player.name.charAt(0).toUpperCase()}
+                  <div className="player-card" key={player.id}>
+                    <div className="avatar">
+                      {player.name.slice(0, 1).toUpperCase()}
                     </div>
 
-                    <span>{player.name}</span>
+                    <div>
+                      <b>{player.name}</b>
+                      <small>
+                        {player.user_id === room.host_id ? "HOST" : "PLAYER"}
+                      </small>
+                    </div>
 
-                    {player.id === hostId && (
-                      <span className="host-label">
-                        <Crown size={14} /> HOST
-                      </span>
-                    )}
-
-                    {player.id === playerId && (
-                      <span className="you-label">YOU</span>
+                    {player.user_id === room.host_id && (
+                      <Crown className="crown" size={18} />
                     )}
                   </div>
                 ))}
               </div>
             </div>
 
-            <div className="panel">
-              <h2>Choose your game mode</h2>
+            <div className="panel mode-picker">
+              <div className="eyebrow">CHOOSE YOUR CHAOS</div>
+              <h2>Game mode</h2>
 
               <div className="mode-list">
-                {GAME_MODES.map((mode) => (
+                {MODES.map((item) => (
                   <button
-                    key={mode.id}
+                    key={item.id}
                     className={
-                      selectedMode === mode.id
-                        ? "mode-option selected"
-                        : "mode-option"
+                      "mode-option " +
+                      (room.mode === item.id ? "selected" : "")
                     }
                     disabled={!isHost}
-                    onClick={() => setSelectedMode(mode.id)}
+                    onClick={async () => {
+                      if (!isHost) return;
+
+                      setSelectedMode(item.id);
+
+                      const { error } = await supabase.rpc(
+                        "words_set_mode",
+                        {
+                          p_code: room.code,
+                          p_mode: item.id
+                        }
+                      );
+
+                      if (error) {
+                        notify(error.message);
+                      } else {
+                        await refresh(room.code);
+                      }
+                    }}
                   >
-                    <span>{mode.icon}</span>
-                    <span>
-                      <strong>{mode.name}</strong>
-                      <small>{mode.description}</small>
-                    </span>
+                    <span>{item.icon}</span>
+                    <div>
+                      <b>{item.name}</b>
+                      <small>{item.desc}</small>
+                    </div>
+
+                    {room.mode === item.id && <Check size={17} />}
                   </button>
                 ))}
               </div>
+
+              {isHost ? (
+                <button
+                  className="btn primary full"
+                  onClick={startGame}
+                  disabled={players.length < 2 || busy}
+                >
+                  <Play size={17} /> Start the game
+                </button>
+              ) : (
+                <p className="waiting">
+                  Waiting for the host to start…
+                </p>
+              )}
+
+              <p className="tiny muted">
+                {players.length} player{players.length === 1 ? "" : "s"} in
+                the room · 2 minimum
+              </p>
             </div>
           </div>
 
-          {isHost ? (
-            <button
-              className="primary-button start-button"
-              onClick={startRound}
-            >
-              <Play size={20} fill="currentColor" />
-              Start game
-            </button>
-          ) : (
-            <div className="waiting-message">
-              Waiting for the host to start the game...
-            </div>
-          )}
+          <button className="text-button" onClick={leave}>
+            <LogOut size={16} /> Leave room
+          </button>
         </section>
       )}
 
-      {screen === "game" && (
-        <section className="game-screen">
-          <div className="game-header">
-            <div>
-              <span className="eyebrow">{modeName()}</span>
-              <h1>Round time!</h1>
-            </div>
-
-            <div className="round-code">
-              ROOM <strong>{roomCode}</strong>
-            </div>
+      {screen === "game" && room && round && (
+        <section className="content-page game-page">
+          <div className="game-meta">
+            <span>ROUND {round.number}</span>
+            <span>{mode.icon} {mode.name}</span>
+            <span>{players.length} PLAYERS</span>
           </div>
 
           <div className="prompt-card">
-            <span>YOUR PROMPT</span>
-            <h2>{prompt}</h2>
+            <div className="eyebrow">YOUR CHALLENGE</div>
+            <h1>{round.prompt}</h1>
+            <p>{mode.desc}</p>
           </div>
 
-          {selectedMode === "picture" ||
-          selectedMode === "telephone" ? (
-            <div className="drawing-area">
-              <div className="drawing-toolbar">
-                <span>
-                  <Palette size={17} /> Your drawing
-                </span>
+          {mode.kind === "draw" ? (
+            <div className="panel drawing-panel">
+              <div className="draw-tools">
+                <label>
+                  INK
+                  <input
+                    type="color"
+                    value={canvasColor}
+                    onChange={(event) => setCanvasColor(event.target.value)}
+                  />
+                </label>
 
-                <button onClick={clearDrawing}>
-                  <RotateCcw size={16} /> Clear
+                <label>
+                  SIZE
+                  <input
+                    type="range"
+                    min="2"
+                    max="18"
+                    value={canvasWidth}
+                    onChange={(event) => setCanvasWidth(+event.target.value)}
+                  />
+                </label>
+
+                <button className="icon-btn" onClick={clearCanvas}>
+                  <Eraser size={16} /> Clear
                 </button>
               </div>
 
               <canvas
-                ref={canvasRef}
-                width={650}
-                height={300}
-                onPointerDown={startDrawing}
-                onPointerMove={draw}
-                onPointerUp={stopDrawing}
-                onPointerLeave={stopDrawing}
+                ref={canvas}
+                width="900"
+                height="520"
+                onPointerDown={beginDraw}
+                onPointerMove={moveDraw}
+                onPointerUp={endDraw}
+                onPointerLeave={endDraw}
               />
-            </div>
-          ) : (
-            <div className="answer-area">
-              <label htmlFor="answer">YOUR ANSWER</label>
-
-              <textarea
-                id="answer"
-                value={answer}
-                onChange={(event) => setAnswer(event.target.value)}
-                placeholder="Make it funny..."
-                maxLength={250}
-                rows={4}
-              />
-
-              <div className="character-count">
-                {answer.length}/250
-              </div>
 
               <button
-                className="primary-button"
-                onClick={submitAnswer}
+                className="btn primary full"
+                onClick={submitDrawing}
               >
-                <Send size={18} /> Submit answer
+                <Send size={17} /> Submit drawing
               </button>
+            </div>
+          ) : (
+            <div className="panel answer-panel">
+              <label>YOUR ANSWER</label>
+
+              <textarea
+                value={answer}
+                onChange={(event) => setAnswer(event.target.value)}
+                maxLength={500}
+                placeholder="Make it clever. Make it weird. Make it CHAOS."
+              />
+
+              <div className="answer-bottom">
+                <small>{answer.length}/500</small>
+
+                <button
+                  className="btn primary"
+                  onClick={submitAnswer}
+                  disabled={!answer.trim()}
+                >
+                  <Send size={17} /> Submit answer
+                </button>
+              </div>
             </div>
           )}
 
-          <div className="submission-status">
-            <Users size={18} />
-            {answers.length} of {players.length} answers submitted
-          </div>
+          <div className="panel submissions">
+            <div className="panel-head">
+              <h2>Players in this round</h2>
+              <span className="count">
+                {roundAnswers.length}/{players.length} submitted
+              </span>
+            </div>
 
-          {isHost && (
-            <button
-              className="secondary-button"
-              onClick={revealAnswers}
-            >
-              Reveal answers
-            </button>
-          )}
+            <div className="submission-list">
+              {players.map((player) => {
+                const submitted = roundAnswers.some(
+                  (item) => item.user_id === player.user_id
+                );
+
+                return (
+                  <div className="submission-row" key={player.id}>
+                    <span className="avatar small-avatar">
+                      {player.name[0].toUpperCase()}
+                    </span>
+
+                    <span>{player.name}</span>
+
+                    <span className={submitted ? "submitted" : "pending"}>
+                      {submitted ? "Submitted ✓" : "Thinking…"}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+
+            {isHost && (
+              <button
+                className="btn secondary full"
+                onClick={finishRound}
+              >
+                End round & reveal answers
+              </button>
+            )}
+          </div>
         </section>
       )}
 
-      {screen === "game" && phase === "reveal" && (
-        <section className="results-screen">
-          <div className="eyebrow">THE ANSWERS ARE IN</div>
-          <h1>Let the chaos begin!</h1>
+      {screen === "results" && room && (
+        <section className="content-page">
+          <div className="page-heading">
+            <div className="eyebrow"><span /> THE REVEAL</div>
+            <h1>THE <em>CHAOS</em> IS IN.</h1>
+            <p>
+              Read the answers, vote for your favourites, and crown
+              the chaos champion.
+            </p>
+          </div>
 
-          <div className="answer-cards">
-            {answers.map((item, index) => (
-              <div className="answer-card" key={item.id}>
-                <span>ANSWER {index + 1}</span>
-                <p>{item.text}</p>
+          <div className="results-grid">
+            {answers.map((item, index) => {
+              const alreadyVoted = votes.length > 0;
+              const ownAnswer = item.user_id === userId;
+              const count = voteCounts[item.id] || 0;
 
-                <button
-                  disabled={hasVoted}
-                  onClick={() => voteForAnswer(item.id)}
-                >
-                  Vote for this answer
-                </button>
+              return (
+                <article className="result-card" key={item.id}>
+                  <div className="result-number">
+                    ANSWER {String(index + 1).padStart(2, "0")}
+                  </div>
 
-                <small>{votes[item.id] || 0} votes</small>
+                  {item.kind === "drawing" ? (
+                    <img
+                      className="drawing-result"
+                      src={item.content}
+                      alt="Player submitted drawing"
+                    />
+                  ) : (
+                    <p>{item.content}</p>
+                  )}
+
+                  <small>
+                    {players.find((player) => player.id === item.player_id)?.name || "Player"}
+                  </small>
+
+                  <button
+                    className="vote-button"
+                    onClick={() => vote(item.id)}
+                    disabled={alreadyVoted || ownAnswer}
+                  >
+                    {votes.includes(item.id)
+                      ? "VOTED ✓"
+                      : ownAnswer
+                      ? "YOUR ANSWER"
+                      : alreadyVoted
+                      ? "VOTE ALREADY CAST"
+                      : "✦ Give 100 points"}
+                  </button>
+
+                  <small className="vote-total">
+                    {count} vote{count === 1 ? "" : "s"}
+                  </small>
+                </article>
+              );
+            })}
+          </div>
+
+          <div className="panel scoreboard">
+            <div className="panel-head">
+              <h2>Scoreboard</h2>
+              <span className="eyebrow">THE CHAOS RANKINGS</span>
+            </div>
+
+            {leaderboard.map((player, index) => (
+              <div className="score-row" key={player.id}>
+                <b>#{index + 1}</b>
+                <span className="avatar small-avatar">
+                  {player.name[0].toUpperCase()}
+                </span>
+                <strong>{player.name}</strong>
+                <span>{player.score} pts</span>
               </div>
             ))}
           </div>
 
           {isHost && (
             <button
-              className="primary-button"
-              onClick={finishRound}
+              className="btn primary next-btn"
+              onClick={nextRound}
             >
-              Finish round
+              <RotateCcw size={17} /> Next round
             </button>
           )}
+
+          <button className="text-button" onClick={leave}>
+            <LogOut size={16} /> Leave room
+          </button>
         </section>
       )}
 
-      {phase === "results" && (
-        <section className="results-screen">
-          <Trophy size={42} />
-          <div className="eyebrow">ROUND COMPLETE</div>
-          <h1>The scoreboard</h1>
-
-          <div className="scoreboard">
-            {[...players]
-              .sort(
-                (a, b) =>
-                  (scores[b.id] || 0) - (scores[a.id] || 0)
-              )
-              .map((player, index) => (
-                <div className="score-row" key={player.id}>
-                  <span>#{index + 1}</span>
-                  <strong>{player.name}</strong>
-                  <b>{scores[player.id] || 0} pts</b>
-                </div>
-              ))}
-          </div>
-
-          {isHost && (
-            <button
-              className="primary-button"
-              onClick={backToLobby}
-            >
-              Back to lobby
-            </button>
-          )}
-        </section>
-      )}
+      <footer>
+        <span>WORDS OF CHAOS © 2026</span>
+        <span>MAKE IT UP. MAKE IT FUN.</span>
+      </footer>
     </main>
   );
 }
